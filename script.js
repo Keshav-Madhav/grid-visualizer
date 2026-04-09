@@ -1501,30 +1501,23 @@ function drawSpectrum() {
     if (!micActive || !micSmoothed) return;
 
     const bins = micSmoothed.length;
-    // Display a subset of bins (skip very high frequencies)
-    const displayBins = Math.min(bins, 128);
-    const barW = 2;
-    const gap = 1;
-    const totalW = displayBins * (barW + gap) - gap;
-    const maxH = 48;
+    const displayBins = Math.min(bins, 200);
+    const totalW = logicalW * 0.7;
+    const barW = totalW / displayBins;
+    const maxH = 32;
     const x0 = (logicalW - totalW) / 2;
-    const y0 = logicalH - maxH - 12;
-
-    // Semi-transparent backdrop
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
-    ctx.fillRect(x0 - 4, y0 - 2, totalW + 8, maxH + 6);
+    const y0 = logicalH - maxH - 8;
 
     for (let i = 0; i < displayBins; i++) {
         const energy = micSmoothed[i];
-        const h = Math.max(1, energy * maxH);
-        // Color from theme LUT based on bin position
+        const h = Math.max(0.5, energy * maxH);
         const ci = Math.min(Math.floor((i / displayBins) * 255), 255);
         const ci3 = ci * 3;
         const r = Math.round(COLOR_LUT_RGB[ci3] * 255);
         const g = Math.round(COLOR_LUT_RGB[ci3 + 1] * 255);
         const b = Math.round(COLOR_LUT_RGB[ci3 + 2] * 255);
-        ctx.fillStyle = `rgb(${r},${g},${b})`;
-        ctx.fillRect(x0 + i * (barW + gap), y0 + maxH - h, barW, h);
+        ctx.fillStyle = `rgba(${r},${g},${b},0.35)`;
+        ctx.fillRect(x0 + i * barW, y0 + maxH - h, Math.max(barW - 0.5, 0.5), h);
     }
 }
 

@@ -349,11 +349,13 @@ function computeNativeFrequencyData() {
         _fftIm[i] = 0;
     }
     fftInPlace(_fftRe, _fftIm);
-    // Magnitude → 0-255 byte (mirrors AnalyserNode: minDecibels=-100, maxDecibels=-30)
+    // Magnitude → 0-255 byte
+    // Range: [-80dB, 0dB] → [0, 255] — wider ceiling than AnalyserNode defaults
+    // to prevent system audio (ScreenCaptureKit) from constantly saturating
     for (let i = 0; i < half; i++) {
         const mag = Math.sqrt(_fftRe[i] * _fftRe[i] + _fftIm[i] * _fftIm[i]);
         const db = 20 * Math.log10(mag / half + 1e-10);
-        const norm = (db + 100) / 70;
+        const norm = (db + 80) / 80;
         micData[i] = Math.max(0, Math.min(255, (norm * 255) | 0));
     }
 }
