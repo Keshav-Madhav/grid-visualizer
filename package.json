@@ -1,0 +1,87 @@
+{
+  "name": "grid-visualizer",
+  "version": "1.0.0",
+  "description": "A real-time audio-reactive dot grid visualizer with physics-driven animations, wave modes, and native system audio capture",
+  "author": "Keshav Madhav",
+  "license": "MIT",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build:native": "bash native/build.sh",
+    "dist": "npm run build:native && electron-builder --mac",
+    "dist:mac": "npm run build:native && electron-builder --mac",
+    "dist:win": "electron-builder --win",
+    "dist:linux": "electron-builder --linux"
+  },
+  "build": {
+    "appId": "com.gridvisualizer.app",
+    "productName": "Grid Visualizer",
+    "asar": true,
+    "electronLanguages": [
+      "en-US"
+    ],
+    "publish": {
+      "provider": "github",
+      "owner": "Keshav-Madhav",
+      "repo": "grid-visualizer"
+    },
+    "files": [
+      "package.json",
+      "index.html",
+      "main.js",
+      "preload.js",
+      "script.js",
+      "globals.js",
+      "webgl.js",
+      "style.css"
+    ],
+    "mac": {
+      "category": "public.app-category.entertainment",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ],
+      "extraResources": [
+        {
+          "from": "native/capture-audio",
+          "to": "native/capture-audio"
+        },
+        {
+          "from": "native/now-playing",
+          "to": "native/now-playing"
+        }
+      ],
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ]
+    }
+  },
+  "devDependencies": {
+    "electron": "^34.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.3"
+  }
+}

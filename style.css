@@ -1,0 +1,20 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    width: 100vw;
+    height: 100dvh;
+    background: #000;
+    overflow: hidden;
+}
+
+canvas {
+    display: block;
+    cursor: none;
+    position: absolute;
+    top: 0;
+    left: 0;
+}
