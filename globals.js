@@ -387,6 +387,8 @@ let windowTransparent = false;
 
 // ── Now Playing ─────────────────────────────────────────
 let nowPlayingActive = false;
+let nowPlayingInfo = null; // { title, artist, album, rate }
+let nowPlayingTextActive = false; // true when dot field holds track text (not a mode label)
 
 // ── Clock Mode ──────────────────────────────────────────
 let clockMode = false;

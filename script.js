@@ -287,6 +287,7 @@ function showLabel(text) {
     modeLabelAlpha = 1;
     textEffectTimer = 0;
     textEffectStrength = 0;
+    nowPlayingTextActive = false; // label is not now-playing text
     if (text) {
         const key = `${logicalW}:${logicalH}:${text}`;
         if (key !== lastTextKey) {
@@ -322,8 +323,8 @@ function showTypeText() {
 function updateTextEffect(dt) {
     if (!textEffectActive) { textEffectStrength = 0; return; }
 
-    // Type mode / clock mode: text stays indefinitely — no fade-out
-    if (typeMode || clockMode) {
+    // Type / clock / now-playing: text stays indefinitely — no fade-out
+    if (typeMode || clockMode || (nowPlayingActive && nowPlayingInfo && nowPlayingTextActive)) {
         textEffectStrength = 1;
         modeLabelAlpha = 1;
         return;
@@ -341,11 +342,24 @@ function updateTextEffect(dt) {
     } else {
         const fade = (textEffectTimer - TEXT_FADE_IN - hold) / TEXT_FADE_OUT;
         if (fade >= 1) {
+            textSizeBoost = 1;
+            textHoldOverride = 0;
+            // If now-playing has active track info, restore its dot text
+            if (nowPlayingActive && nowPlayingInfo && nowPlayingInfo.title && !typeMode && !clockMode) {
+                const text = nowPlayingInfo.artist
+                    ? `${nowPlayingInfo.artist.toUpperCase()}\n${nowPlayingInfo.title.toUpperCase()}`
+                    : nowPlayingInfo.title.toUpperCase();
+                const key = `${logicalW}:${logicalH}:${text}`;
+                if (key !== lastTextKey) { lastTextKey = key; computeTextField(text); }
+                else { textEffectActive = true; }
+                nowPlayingTextActive = true;
+                textEffectStrength = 1;
+                modeLabelAlpha = 1;
+                return;
+            }
             textEffectStrength = 0;
             textEffectActive = false;
             modeLabelAlpha = 0;
-            textSizeBoost = 1;
-            textHoldOverride = 0;
         } else {
             textEffectStrength = 1 - fade * fade;
             modeLabelAlpha = textEffectStrength;
@@ -424,8 +438,21 @@ window.addEventListener('keydown', (e) => {
             typeText = '';
             clockMode = false;
             lastClockText = '';
-            textEffectActive = false;
-            textEffectStrength = 0;
+            // Restore now-playing text if active, otherwise clear
+            if (nowPlayingActive && nowPlayingInfo && nowPlayingInfo.title) {
+                const npText = nowPlayingInfo.artist
+                    ? `${nowPlayingInfo.artist.toUpperCase()}\n${nowPlayingInfo.title.toUpperCase()}`
+                    : nowPlayingInfo.title.toUpperCase();
+                const key = `${logicalW}:${logicalH}:${npText}`;
+                if (key !== lastTextKey) { lastTextKey = key; computeTextField(npText); }
+                else { textEffectActive = true; }
+                nowPlayingTextActive = true;
+                textEffectStrength = 1;
+                modeLabelAlpha = 1;
+            } else {
+                textEffectActive = false;
+                textEffectStrength = 0;
+            }
         } else if (e.key === 'Enter') {
             typeText += '\n';
             showTypeText();
@@ -955,8 +982,6 @@ function stopAudio() {
         window.electronAPI.stopSystemAudio();
         window.electronAPI.removeAudioListeners();
     }
-    // Stop now-playing when audio stops
-    stopNowPlaying();
 }
 
 async function toggleSystemAudio() {
@@ -1019,8 +1044,6 @@ async function toggleSystemAudio() {
             micActive = true;
             showLabel('SYSTEM AUDIO');
             audioSource = 'sys';
-            // Auto-start now-playing with system audio
-            startNowPlaying();
             return;
         }
 
@@ -1056,7 +1079,6 @@ async function toggleSystemAudio() {
 
             startAudioAnalyser(new MediaStream(audioTracks), 'SYSTEM AUDIO');
             audioSource = 'sys';
-            startNowPlaying();
             return;
         }
 
@@ -1231,13 +1253,29 @@ async function startNowPlaying() {
     nowPlayingActive = true;
     window.electronAPI.onNowPlaying((data) => {
         if (!nowPlayingActive) return;
-        if (!data.title && !data.artist) return;
-        // Don't interrupt type mode or clock mode
+        if (!data.title && !data.artist) {
+            nowPlayingInfo = null;
+            return;
+        }
+        nowPlayingInfo = data;
+        // Don't interrupt type/clock mode
         if (typeMode || clockMode) return;
+        // If a mode label is currently fading, let it finish — the restore
+        // logic in updateTextEffect will pick up the new nowPlayingInfo
+        if (textEffectActive && !nowPlayingTextActive) return;
         const text = data.artist
             ? `${data.artist.toUpperCase()}\n${data.title.toUpperCase()}`
             : data.title.toUpperCase();
-        showLabel(text);
+        const key = `${logicalW}:${logicalH}:${text}`;
+        if (key !== lastTextKey) {
+            lastTextKey = key;
+            computeTextField(text);
+        } else {
+            textEffectActive = true;
+        }
+        nowPlayingTextActive = true;
+        textEffectStrength = 1;
+        modeLabelAlpha = 1;
     });
     await window.electronAPI.startNowPlaying();
 }
@@ -1245,9 +1283,16 @@ async function startNowPlaying() {
 function stopNowPlaying() {
     if (!nowPlayingActive) return;
     nowPlayingActive = false;
+    nowPlayingInfo = null;
+    nowPlayingTextActive = false;
     if (window.electronAPI) {
         window.electronAPI.stopNowPlaying();
         window.electronAPI.removeNowPlayingListener();
+    }
+    // Clear dot text if now-playing was driving it
+    if (!typeMode && !clockMode) {
+        textEffectActive = false;
+        textEffectStrength = 0;
     }
 }
 
@@ -1497,6 +1542,32 @@ function drawCursor() {
     ctx.stroke();
 }
 
+function drawNowPlaying() {
+    if (!nowPlayingActive || !nowPlayingInfo) return;
+    if (!nowPlayingInfo.title && !nowPlayingInfo.artist) return;
+
+    const title = nowPlayingInfo.title || '';
+    const artist = nowPlayingInfo.artist || '';
+    const paused = nowPlayingInfo.rate === 0;
+
+    const pad = 12;
+    const x = pad + 6;
+    const y = logicalH - pad;
+
+    ctx.font = '600 13px -apple-system, "Helvetica Neue", sans-serif';
+    ctx.textBaseline = 'bottom';
+    ctx.textAlign = 'left';
+
+    // Title
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.fillText(title, x, y - 16);
+
+    // Artist (dimmer)
+    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    ctx.font = '400 11px -apple-system, "Helvetica Neue", sans-serif';
+    ctx.fillText(artist + (paused ? '  ⏸' : ''), x, y);
+}
+
 function drawSpectrum() {
     if (!micActive || !micSmoothed) return;
 
@@ -1622,9 +1693,10 @@ function loop(timestamp) {
     // WebGL: draw dots (clears + renders in one call)
     drawDots();
 
-    // 2D overlay: cursor + spectrum + debug (transparent background)
+    // 2D overlay (transparent background)
     ctx.clearRect(0, 0, logicalW, logicalH);
     drawCursor();
+    drawNowPlaying();
     drawSpectrum();
     drawDebug();
     requestAnimationFrame(loop);
@@ -1667,6 +1739,9 @@ wakeVisibleDots();
 if (windowTransparent && window.electronAPI) {
     window.electronAPI.setTransparency(true);
 }
+
+// Auto-start now-playing (works for all sources: Spotify, browsers, Apple Music, etc.)
+startNowPlaying();
 
 // Startup splash — big "Hi" with the dotted i
 textSizeBoost = 1.8;
