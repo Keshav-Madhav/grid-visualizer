@@ -34,12 +34,16 @@ function killAudioProcess() {
     }
 }
 
+const appIconPath = path.join(__dirname, 'build',
+    process.platform === 'win32' ? 'icon.ico' : 'icon.png');
+
 function createWindow() {
     mainWindow = new BrowserWindow({
         title: 'Grid Visualizer',
         width: 1280,
         height: 800,
         backgroundColor: '#000',
+        icon: appIconPath,
         webPreferences: {
             preload: path.join(__dirname, 'preload.js'),
             contextIsolation: true,
@@ -74,6 +78,11 @@ app.whenReady().then(async () => {
         const allowed = ['media', 'display-capture', 'mediaKeySystem'].includes(permission);
         callback(allowed);
     });
+
+    // Set macOS dock icon (needed in dev mode; packaged .app uses .icns from bundle)
+    if (process.platform === 'darwin' && app.dock) {
+        app.dock.setIcon(nativeImage.createFromPath(appIconPath));
+    }
 
     createWindow();
     setupTray();
