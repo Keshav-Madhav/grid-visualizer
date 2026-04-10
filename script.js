@@ -1887,4 +1887,19 @@ textSizeBoost = 1.8;
 textHoldOverride = 2.0;
 showLabel('Hi');
 
+// ── Download toast (browser only) ─────────────────────────
+if (!window.electronAPI) {
+    const DISMISS_KEY = 'gridViz_downloadDismissed';
+    if (!localStorage.getItem(DISMISS_KEY)) {
+        const toast = document.getElementById('downloadToast');
+        setTimeout(() => { toast.style.display = 'flex'; }, 3000);
+
+        document.getElementById('downloadToastClose').addEventListener('click', () => {
+            toast.classList.add('hiding');
+            toast.addEventListener('animationend', () => { toast.style.display = 'none'; }, { once: true });
+            localStorage.setItem(DISMISS_KEY, '1');
+        });
+    }
+}
+
 loop();
