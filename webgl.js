@@ -2,7 +2,7 @@
 // Replaces Canvas 2D batched rendering with a single GPU draw call.
 // All dots are rendered as GL_POINTS with circular fragment shader.
 
-const GL_MAX_DOTS = 500000;
+const GL_MAX_DOTS = 100000;
 
 // CPU-side interleaved buffer: [x, y, radius, r, g, b] per dot (6 floats)
 const glDotBuf = new Float32Array(GL_MAX_DOTS * 6);

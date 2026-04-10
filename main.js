@@ -8,6 +8,11 @@ const path = require('path');
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) { app.quit(); }
 
+// Prevent Chromium from throttling background/occluded windows (critical for wallpaper mode)
+app.commandLine.appendSwitch('disable-renderer-backgrounding');
+app.commandLine.appendSwitch('disable-background-timer-throttling');
+app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
+
 let mainWindow;
 let audioProcess = null;
 let nowPlayingProcess = null;
@@ -315,6 +320,7 @@ function enterWallpaperMode() {
         hasShadow: false,
         roundedCorners: false,
         webPreferences: {
+            backgroundThrottling: false,
             preload: path.join(__dirname, 'preload.js'),
             contextIsolation: true,
             nodeIntegration: false

@@ -49,7 +49,7 @@ const dotColor = '#ffffff';
 
 // Active dots
 const activeDots = new Map();
-let activeKeySet = new Set(); // pre-built each frame for O(1) draw-loop checks
+const activeKeySet = new Set(); // maintained incrementally via wakeDot/sleep/prune
 
 // Spring physics — underdamped, snappy
 const springK = 28;
@@ -62,7 +62,7 @@ const sleepVelThr = 0.3;
 // Mouse force — radius tied to cursor size
 let mouseForceRadius = 120;
 const mouseForceStrength = 12000;
-let mouseWorld = { x: 0, y: 0 };
+let mouseWorldX = 0, mouseWorldY = 0;
 let mouseHasEntered = false;
 
 // Neighbor interactions
@@ -265,6 +265,7 @@ function cycleTheme() {
     currentThemeIdx = (currentThemeIdx + 1) % THEME_NAMES.length;
     COLOR_STOPS = COLOR_THEMES[THEME_NAMES[currentThemeIdx]];
     rebuildColorLUT();
+    rebuildSpectrumColorLUT();
 }
 
 function speedToColor(speed) {
@@ -291,6 +292,23 @@ let fxColorBand = false;
 // Colorband RGB output (set by computeColorbandRGB, read by drawDots)
 let _cbR = 0, _cbG = 0, _cbB = 0;
 
+// Per-frame colorband band averages (computed once, reused per dot)
+let _cbBass = 0, _cbMids = 0, _cbTreb = 0;
+let _cbBandsDirty = true; // set true each frame when mic updates
+
+// Pre-computed spectrum bar color strings (rebuilt on theme change)
+const SPECTRUM_COLOR_LUT = new Array(256);
+function rebuildSpectrumColorLUT() {
+    for (let ci = 0; ci < 256; ci++) {
+        const ci3 = ci * 3;
+        const r = Math.round(COLOR_LUT_RGB[ci3] * 255);
+        const g = Math.round(COLOR_LUT_RGB[ci3 + 1] * 255);
+        const b = Math.round(COLOR_LUT_RGB[ci3 + 2] * 255);
+        SPECTRUM_COLOR_LUT[ci] = `rgba(${r},${g},${b},0.35)`;
+    }
+}
+rebuildSpectrumColorLUT();
+
 // ── Cursor auto-hide ────────────────────────────────────
 let cursorIdleTime = 0;
 let cursorVisible = true;
@@ -308,6 +326,25 @@ const _fftIm = new Float32Array(FFT_N);
 const _fftWin = new Float32Array(FFT_N);
 for (let i = 0; i < FFT_N; i++) _fftWin[i] = 0.5 * (1 - Math.cos(TWO_PI * i / (FFT_N - 1)));
 
+// Pre-computed twiddle factors for FFT (avoids Math.cos/sin per frame)
+const _fftTwiddleRe = [];
+const _fftTwiddlIm = [];
+{
+    const n = FFT_N;
+    for (let len = 2; len <= n; len <<= 1) {
+        const half = len >> 1;
+        const re = new Float32Array(half);
+        const im = new Float32Array(half);
+        for (let j = 0; j < half; j++) {
+            const angle = -TWO_PI * j / len;
+            re[j] = Math.cos(angle);
+            im[j] = Math.sin(angle);
+        }
+        _fftTwiddleRe.push(re);
+        _fftTwiddlIm.push(im);
+    }
+}
+
 function fftInPlace(re, im) {
     const n = re.length;
     for (let i = 1, j = 0; i < n; i++) {
@@ -319,23 +356,21 @@ function fftInPlace(re, im) {
             tmp = im[i]; im[i] = im[j]; im[j] = tmp;
         }
     }
+    let stage = 0;
     for (let len = 2; len <= n; len <<= 1) {
         const half = len >> 1;
-        const angle = -TWO_PI / len;
-        const wRe = Math.cos(angle), wIm = Math.sin(angle);
+        const twRe = _fftTwiddleRe[stage];
+        const twIm = _fftTwiddlIm[stage];
         for (let i = 0; i < n; i += len) {
-            let cRe = 1, cIm = 0;
             for (let j = 0; j < half; j++) {
                 const uRe = re[i + j], uIm = im[i + j];
-                const vRe = re[i + j + half] * cRe - im[i + j + half] * cIm;
-                const vIm = re[i + j + half] * cIm + im[i + j + half] * cRe;
+                const vRe = re[i + j + half] * twRe[j] - im[i + j + half] * twIm[j];
+                const vIm = re[i + j + half] * twIm[j] + im[i + j + half] * twRe[j];
                 re[i + j] = uRe + vRe;  im[i + j] = uIm + vIm;
                 re[i + j + half] = uRe - vRe;  im[i + j + half] = uIm - vIm;
-                const nr = cRe * wRe - cIm * wIm;
-                cIm = cRe * wIm + cIm * wRe;
-                cRe = nr;
             }
         }
+        stage++;
     }
 }
 
@@ -343,8 +378,9 @@ function fftInPlace(re, im) {
 function computeNativeFrequencyData() {
     const half = FFT_N / 2;
     // Copy latest FFT_N samples from ring buffer, apply Hann window
+    const bufMask = NATIVE_BUF_SIZE - 1; // 4095, power-of-2 mask
     for (let i = 0; i < FFT_N; i++) {
-        const idx = (nativeAudioWrite - FFT_N + i + NATIVE_BUF_SIZE) % NATIVE_BUF_SIZE;
+        const idx = (nativeAudioWrite - FFT_N + i) & bufMask;
         _fftRe[i] = (nativeAudioBuf[idx] || 0) * _fftWin[i];
         _fftIm[i] = 0;
     }
@@ -363,11 +399,19 @@ function computeNativeFrequencyData() {
 // ── Text Dot Effect ─────────────────────────────────────
 const textOffscreen = document.createElement('canvas');
 const textOffscreenCtx = textOffscreen.getContext('2d', { willReadFrequently: true });
-// Pre-allocated buffers — sized for up to 4K display at textFieldScale
-const TEXT_BUF_MAX = Math.ceil(3840 * 0.5) * Math.ceil(2160 * 0.5); // ~2M entries
-let textDistField = new Float32Array(TEXT_BUF_MAX);
-let textGradX = new Float32Array(TEXT_BUF_MAX);
-let textGradY = new Float32Array(TEXT_BUF_MAX);
+// Lazy-allocated text buffers — sized to actual display, not 4K worst case
+let TEXT_BUF_SIZE = 0;
+let textDistField = null;
+let textGradX = null;
+let textGradY = null;
+
+function ensureTextBuffers(needed) {
+    if (needed <= TEXT_BUF_SIZE) return;
+    TEXT_BUF_SIZE = needed;
+    textDistField = new Float32Array(needed);
+    textGradX = new Float32Array(needed);
+    textGradY = new Float32Array(needed);
+}
 let textFieldW = 0;
 let textFieldH = 0;
 const textFieldScale = 0.5;
@@ -442,6 +486,7 @@ function loadSettings() {
             currentThemeIdx = s.currentThemeIdx;
             COLOR_STOPS = COLOR_THEMES[THEME_NAMES[currentThemeIdx]];
             rebuildColorLUT();
+            rebuildSpectrumColorLUT();
         }
         if (s.gridSpacing != null) gridSpacing = Math.max(gridSpacingMin, Math.min(gridSpacingMax, s.gridSpacing));
         if (s.fxColor != null) fxColor = s.fxColor;
