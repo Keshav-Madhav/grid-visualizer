@@ -1892,6 +1892,10 @@ if (!window.electronAPI) {
     const DISMISS_KEY = 'gridViz_downloadDismissed';
     if (!localStorage.getItem(DISMISS_KEY)) {
         const toast = document.getElementById('downloadToast');
+        const isMac = /Mac|iPhone|iPad|iPod/.test(navigator.userAgent);
+        const primaryBtn = document.getElementById(isMac ? 'downloadMac' : 'downloadWin');
+        if (primaryBtn) primaryBtn.classList.add('primary');
+
         setTimeout(() => { toast.style.display = 'flex'; }, 3000);
 
         document.getElementById('downloadToastClose').addEventListener('click', () => {

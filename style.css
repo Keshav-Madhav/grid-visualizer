@@ -57,11 +57,6 @@ canvas {
     to   { opacity: 0; transform: translateY(10px) scale(0.96); }
 }
 
-.download-toast-icon {
-    flex-shrink: 0;
-    color: rgba(255, 255, 255, 0.8);
-}
-
 .download-toast-text {
     display: flex;
     flex-direction: column;
@@ -80,9 +75,18 @@ canvas {
     color: rgba(255, 255, 255, 0.5);
 }
 
+.download-toast-buttons {
+    display: flex;
+    gap: 6px;
+    flex-shrink: 0;
+}
+
 .download-toast-btn {
     flex-shrink: 0;
-    padding: 5px 14px;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 5px 12px;
     background: rgba(255, 255, 255, 0.14);
     border: none;
     border-radius: 7px;
@@ -92,11 +96,24 @@ canvas {
     font-family: inherit;
     text-decoration: none;
     cursor: pointer;
-    transition: background 0.15s;
+    transition: background 0.15s, box-shadow 0.15s;
 }
 
 .download-toast-btn:hover {
     background: rgba(255, 255, 255, 0.22);
+}
+
+.download-toast-btn.primary {
+    background: rgba(255, 255, 255, 0.22);
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.15);
+}
+
+.download-toast-btn.primary:hover {
+    background: rgba(255, 255, 255, 0.30);
+}
+
+.download-toast-btn svg {
+    flex-shrink: 0;
 }
 
 .download-toast-close {
