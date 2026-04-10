@@ -48,7 +48,8 @@ function createWindow() {
     });
 
     mainWindow.loadFile('index.html');
-    mainWindow.setMenuBarVisibility(false);
+    // On Windows/Linux, hide the default menu bar (macOS menu bar is always global)
+    if (process.platform !== 'darwin') mainWindow.setMenuBarVisibility(false);
 
     mainWindow.webContents.on('before-input-event', (event, input) => {
         if (input.key === 'F11') mainWindow.setFullScreen(!mainWindow.isFullScreen());
@@ -66,12 +67,8 @@ app.on('second-instance', () => {
 
 // Auto-grant media permissions (mic, screen capture)
 app.whenReady().then(async () => {
-    if (process.platform === 'darwin') {
-        const micStatus = systemPreferences.getMediaAccessStatus('microphone');
-        if (micStatus !== 'granted') {
-            await systemPreferences.askForMediaAccess('microphone');
-        }
-    }
+    // Don't prompt for mic at startup — let the user trigger it via Space key.
+    // The permission dialog will appear naturally when they first activate audio.
 
     session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
         const allowed = ['media', 'display-capture', 'mediaKeySystem'].includes(permission);
@@ -80,6 +77,7 @@ app.whenReady().then(async () => {
 
     createWindow();
     setupTray();
+    setupAppMenu();
 
     // Global shortcut to toggle wallpaper mode from anywhere
     globalShortcut.register('CommandOrControl+Shift+W', () => {
@@ -494,6 +492,103 @@ function setupTray() {
     tray = new Tray(createTrayIcon());
     tray.setToolTip('Grid Visualizer');
     updateTrayMenu();
+}
+
+// ── macOS Application Menu ────────────────────────────────────
+
+function setupAppMenu() {
+    const isMac = process.platform === 'darwin';
+    if (!isMac) return; // Windows/Linux use tray only
+
+    const template = [
+        {
+            label: app.name,
+            submenu: [
+                { role: 'about' },
+                { type: 'separator' },
+                { role: 'hide' },
+                { role: 'hideOthers' },
+                { role: 'unhide' },
+                { type: 'separator' },
+                { role: 'quit' }
+            ]
+        },
+        {
+            label: 'View',
+            submenu: [
+                {
+                    label: 'Wallpaper Mode',
+                    accelerator: 'CmdOrCtrl+Shift+W',
+                    click: () => toggleWallpaperMode()
+                },
+                { type: 'separator' },
+                {
+                    label: 'Fullscreen',
+                    accelerator: 'F',
+                    click: () => { if (mainWindow) mainWindow.setFullScreen(!mainWindow.isFullScreen()); }
+                },
+                { type: 'separator' },
+                { role: 'toggleDevTools' }
+            ]
+        },
+        {
+            label: 'Wave Mode',
+            submenu: [
+                { label: 'Ripple',       accelerator: '1', click: () => sendTrayAction('mode', 1) },
+                { label: 'Spiral',       accelerator: '2', click: () => sendTrayAction('mode', 2) },
+                { label: 'Vortex',       accelerator: '3', click: () => sendTrayAction('mode', 3) },
+                { label: 'Interference', accelerator: '4', click: () => sendTrayAction('mode', 4) },
+                { label: 'Dipole',       accelerator: '5', click: () => sendTrayAction('mode', 5) },
+                { label: 'Drift',        accelerator: '6', click: () => sendTrayAction('mode', 6) },
+                { label: 'Gravity',      accelerator: '7', click: () => sendTrayAction('mode', 7) },
+                { label: 'Rain',         accelerator: '8', click: () => sendTrayAction('mode', 8) },
+                { label: 'Noise Field',  accelerator: '9', click: () => sendTrayAction('mode', 9) },
+            ]
+        },
+        {
+            label: 'Theme',
+            submenu: [
+                { label: 'Aurora',  click: () => sendTrayAction('theme', 0) },
+                { label: 'Ocean',   click: () => sendTrayAction('theme', 1) },
+                { label: 'Fire',    click: () => sendTrayAction('theme', 2) },
+                { label: 'Neon',    click: () => sendTrayAction('theme', 3) },
+                { label: 'Mono',    click: () => sendTrayAction('theme', 4) },
+                { label: 'Pastel',  click: () => sendTrayAction('theme', 5) },
+                { label: 'Sunset',  click: () => sendTrayAction('theme', 6) },
+                { label: 'Matrix',  click: () => sendTrayAction('theme', 7) },
+            ]
+        },
+        {
+            label: 'Audio',
+            submenu: [
+                { label: 'Cycle Source (Off → Mic → System)', accelerator: 'Space', click: () => sendTrayAction('audio-cycle') },
+                { label: 'Now Playing', accelerator: 'N', click: () => sendTrayAction('now-playing') },
+            ]
+        },
+        {
+            label: 'Effects',
+            submenu: [
+                { label: 'Color FX',       click: () => sendTrayAction('toggle', 'color') },
+                { label: 'Size FX',        click: () => sendTrayAction('toggle', 'size') },
+                { label: 'Color Band',     click: () => sendTrayAction('toggle', 'colorband') },
+                { label: 'Freq Band Mode', click: () => sendTrayAction('toggle', 'freqband') },
+                { type: 'separator' },
+                { label: 'Pause Physics', accelerator: 'P', click: () => sendTrayAction('toggle', 'physics') },
+                { label: 'Clock Mode',   accelerator: 'K', click: () => sendTrayAction('toggle', 'clock') },
+            ]
+        },
+        {
+            label: 'Window',
+            submenu: [
+                { role: 'minimize' },
+                { role: 'zoom' },
+                { type: 'separator' },
+                { role: 'front' }
+            ]
+        }
+    ];
+
+    Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
 // ── Lifecycle ──────────────────────────────────────────────

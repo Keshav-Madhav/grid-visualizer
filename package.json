@@ -1,6 +1,6 @@
 {
   "name": "grid-visualizer",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "A real-time audio-reactive dot grid visualizer with physics-driven animations, wave modes, and native system audio capture",
   "author": "Keshav Madhav",
   "license": "MIT",
@@ -40,6 +40,7 @@
       "build/trayTemplate@2x.png"
     ],
     "mac": {
+      "icon": "build/icon.png",
       "category": "public.app-category.entertainment",
       "target": [
         {

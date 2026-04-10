@@ -1879,11 +1879,15 @@ function tryAutoMic() {
     }
 }
 
-// Delay mic start until after the startup splash (fade-in + hold + fade-out)
+// Delay mic start until after the startup splash — only if permission already granted
 const SPLASH_DURATION = TEXT_FADE_IN + 2.0 + TEXT_FADE_OUT + 0.1;
 
 if (window.electronAPI) {
-    setTimeout(() => toggleMic(), SPLASH_DURATION * 1000);
+    setTimeout(async () => {
+        // Only auto-start if mic permission is already granted (don't nag on first install)
+        const perms = await window.electronAPI.checkPermissions();
+        if (perms.microphone === 'granted') toggleMic();
+    }, SPLASH_DURATION * 1000);
 } else {
     function onFirstInteraction() {
         tryAutoMic();
