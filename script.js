@@ -516,6 +516,10 @@ window.addEventListener('keydown', (e) => {
         if (e.key === 'n') {
             toggleNowPlaying();
         }
+        if (e.key === 'p') {
+            physicsPaused = !physicsPaused;
+            showLabel(physicsPaused ? 'PHYSICS OFF' : 'PHYSICS ON');
+        }
     }
 });
 
@@ -1634,14 +1638,16 @@ function update(dt) {
 
     mouseWorld = screenToWorld(cursor.x, cursor.y);
 
-    if (waveActive) {
-        waveOrigin.x = mouseWorld.x;
-        waveOrigin.y = mouseWorld.y;
-        waveTime += dt;
-    }
-    // Mic needs time to animate even without click
-    if (micActive && !waveActive) {
-        waveTime += dt;
+    if (!physicsPaused) {
+        if (waveActive) {
+            waveOrigin.x = mouseWorld.x;
+            waveOrigin.y = mouseWorld.y;
+            waveTime += dt;
+        }
+        // Mic needs time to animate even without click
+        if (micActive && !waveActive) {
+            waveTime += dt;
+        }
     }
 
     cursor.radius += (cursor.targetRadius - cursor.radius) * 0.12;
@@ -1662,8 +1668,10 @@ function update(dt) {
     cursorIdleTime += dt;
     if (cursorIdleTime > CURSOR_HIDE_DELAY) cursorVisible = false;
 
-    updateDots(dt);
-    sleepSettledDots();
+    if (!physicsPaused) {
+        updateDots(dt);
+        sleepSettledDots();
+    }
 
     // Pre-build key set once per frame — O(activeDots.size) here saves
     // O(drawnDots) dotKey() + Map.has() calls in the inner draw loop
@@ -1695,7 +1703,7 @@ function loop(timestamp) {
 
     // 2D overlay (transparent background)
     ctx.clearRect(0, 0, logicalW, logicalH);
-    drawCursor();
+    if (!wallpaperModeActive) drawCursor(); // hide cursor in wallpaper mode
     drawNowPlaying();
     drawSpectrum();
     drawDebug();
@@ -1742,6 +1750,137 @@ if (windowTransparent && window.electronAPI) {
 
 // Auto-start now-playing (works for all sources: Spotify, browsers, Apple Music, etc.)
 startNowPlaying();
+
+// ── Wallpaper Mode (renderer side) ─────────────────────
+
+function toggleWallpaperMode() {
+    if (!window.electronAPI) {
+        showLabel('ELECTRON ONLY');
+        return;
+    }
+    window.electronAPI.toggleWallpaper();
+}
+
+if (window.electronAPI) {
+    // Listen for wallpaper mode changes from main process (tray / global shortcut)
+    window.electronAPI.onWallpaperModeChanged((enabled) => {
+        wallpaperModeActive = enabled;
+        if (enabled) {
+            // Auto-activate waves so the mouse interaction is visible
+            mouseHasEntered = true;
+            waveActive = true;
+        }
+        showLabel(enabled ? 'WALLPAPER' : 'WINDOWED');
+    });
+
+    // Polled mouse position from main process (desktop windows don't get mouse events)
+    window.electronAPI.onMousePosition((x, y) => {
+        if (!wallpaperModeActive) return;
+        cursorIdleTime = 0;
+        cursorVisible = true;
+        cursor.x = x;
+        cursor.y = y;
+        camera.clientX = x;
+        camera.clientY = y;
+        mouseWorld = screenToWorld(x, y);
+
+        if (!waveActive) {
+            waveOrigin.x = mouseWorld.x;
+            waveOrigin.y = mouseWorld.y;
+            waveTime = 0;
+            computeRingRadii();
+            waveActive = true;
+            wakeVisibleDots();
+        }
+    });
+
+    // Listen for mode changes from tray menu (legacy)
+    window.electronAPI.onSetMode((mode) => {
+        if (clockMode) { clockMode = false; lastClockText = ''; }
+        if (typeMode) { typeMode = false; typeText = ''; }
+        waveMode = mode;
+        showLabel(MODE_NAMES[waveMode] || '');
+        if (!waveActive) {
+            waveOrigin.x = mouseWorld.x;
+            waveOrigin.y = mouseWorld.y;
+            waveTime = 0;
+            computeRingRadii();
+            waveActive = true;
+            wakeVisibleDots();
+        }
+        saveSettings();
+    });
+
+    // Tray actions (submenus)
+    window.electronAPI.onTrayAction((action, value) => {
+        switch (action) {
+            case 'mode': {
+                if (clockMode) { clockMode = false; lastClockText = ''; }
+                if (typeMode) { typeMode = false; typeText = ''; }
+                waveMode = value;
+                showLabel(MODE_NAMES[waveMode] || '');
+                if (!waveActive) {
+                    waveOrigin.x = mouseWorld.x;
+                    waveOrigin.y = mouseWorld.y;
+                    waveTime = 0;
+                    computeRingRadii();
+                    waveActive = true;
+                    wakeVisibleDots();
+                }
+                saveSettings();
+                break;
+            }
+            case 'theme': {
+                currentThemeIdx = value;
+                COLOR_STOPS = COLOR_THEMES[THEME_NAMES[currentThemeIdx]];
+                rebuildColorLUT();
+                showLabel(THEME_NAMES[currentThemeIdx]);
+                saveSettings();
+                break;
+            }
+            case 'audio-cycle': {
+                cycleAudioSource();
+                break;
+            }
+            case 'now-playing': {
+                toggleNowPlaying();
+                break;
+            }
+            case 'toggle': {
+                switch (value) {
+                    case 'color':
+                        fxColor = !fxColor;
+                        showLabel(fxColor ? 'COLOR ON' : 'COLOR OFF');
+                        saveSettings();
+                        break;
+                    case 'size':
+                        fxSize = !fxSize;
+                        showLabel(fxSize ? 'SIZE ON' : 'SIZE OFF');
+                        saveSettings();
+                        break;
+                    case 'colorband':
+                        fxColorBand = !fxColorBand;
+                        showLabel(fxColorBand ? 'COLOR BAND ON' : 'COLOR BAND OFF');
+                        saveSettings();
+                        break;
+                    case 'freqband':
+                        freqBandMode = (freqBandMode + 1) % FREQ_BAND_NAMES.length;
+                        showLabel(FREQ_BAND_NAMES[freqBandMode]);
+                        saveSettings();
+                        break;
+                    case 'physics':
+                        physicsPaused = !physicsPaused;
+                        showLabel(physicsPaused ? 'PHYSICS OFF' : 'PHYSICS ON');
+                        break;
+                    case 'clock':
+                        toggleClockMode();
+                        break;
+                }
+                break;
+            }
+        }
+    });
+}
 
 // Startup splash — big "Hi" with the dotted i
 textSizeBoost = 1.8;

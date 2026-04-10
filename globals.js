@@ -385,6 +385,9 @@ const TEXT_PUSH_MARGIN = 6; // extra screen pixels beyond boundary — tight for
 // ── Window Transparency ─────────────────────────────────
 let windowTransparent = false;
 
+// ── Wallpaper Mode ──────────────────────────────────────
+let wallpaperModeActive = false;
+
 // ── Now Playing ─────────────────────────────────────────
 let nowPlayingActive = false;
 let nowPlayingInfo = null; // { title, artist, album, rate }
@@ -393,6 +396,9 @@ let nowPlayingTextActive = false; // true when dot field holds track text (not a
 // ── Clock Mode ──────────────────────────────────────────
 let clockMode = false;
 let lastClockText = '';
+
+// Physics pause
+let physicsPaused = false;
 
 // Debug
 let debugMode = false;

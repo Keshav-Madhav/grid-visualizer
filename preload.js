@@ -63,5 +63,25 @@ contextBridge.exposeInMainWorld('electronAPI', {
     },
 
     // Desktop capturer fallback (Windows/Linux)
-    getDesktopSources: () => ipcRenderer.invoke('get-desktop-sources')
+    getDesktopSources: () => ipcRenderer.invoke('get-desktop-sources'),
+
+    // Wallpaper mode
+    toggleWallpaper: () => ipcRenderer.invoke('toggle-wallpaper'),
+    getWallpaperState: () => ipcRenderer.invoke('get-wallpaper-state'),
+    onWallpaperModeChanged: (callback) => {
+        ipcRenderer.removeAllListeners('wallpaper-mode-changed');
+        ipcRenderer.on('wallpaper-mode-changed', (event, enabled) => callback(enabled));
+    },
+    onMousePosition: (callback) => {
+        ipcRenderer.removeAllListeners('mouse-position');
+        ipcRenderer.on('mouse-position', (event, x, y) => callback(x, y));
+    },
+    onSetMode: (callback) => {
+        ipcRenderer.removeAllListeners('set-mode');
+        ipcRenderer.on('set-mode', (event, mode) => callback(mode));
+    },
+    onTrayAction: (callback) => {
+        ipcRenderer.removeAllListeners('tray-action');
+        ipcRenderer.on('tray-action', (event, action, value) => callback(action, value));
+    }
 });
