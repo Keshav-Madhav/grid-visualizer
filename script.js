@@ -14,19 +14,18 @@ function resize() {
     logicalW = window.innerWidth;
     logicalH = window.innerHeight;
 
-    // WebGL canvas
+    // WebGL canvas — needs full DPR for crisp dots
     glCanvas.width = logicalW * dpr;
     glCanvas.height = logicalH * dpr;
     glCanvas.style.width = logicalW + 'px';
     glCanvas.style.height = logicalH + 'px';
     resizeGL(gl, logicalW, logicalH, dpr);
 
-    // 2D overlay canvas (cursor + debug)
-    canvas.width = logicalW * dpr;
-    canvas.height = logicalH * dpr;
+    // 2D overlay canvas — 1x DPR is fine for cursor/debug/text (saves 75% memory on 2x displays)
+    canvas.width = logicalW;
+    canvas.height = logicalH;
     canvas.style.width = logicalW + 'px';
     canvas.style.height = logicalH + 'px';
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
     // Invalidate cached text field so it recomputes at new resolution
     lastTextKey = '';
@@ -622,16 +621,24 @@ canvas.addEventListener('wheel', (e) => {
 
 // ── Dot Management ──────────────────────────────────────
 
+// Reusable visible range — avoids object allocation every call (3x per frame)
+let _vrIMin = 0, _vrIMax = 0, _vrJMin = 0, _vrJMax = 0;
+// Scratch vars for allocation-free screenToWorld in getVisibleRange
+let _s2wX = 0, _s2wY = 0;
+function _screenToWorldScratch(sx, sy) {
+    _s2wX = (sx - logicalW / 2) / zoomFactor + camera.x + logicalW / 2;
+    _s2wY = (sy - logicalH / 2) / zoomFactor + camera.y + logicalH / 2;
+}
 function getVisibleRange(padding) {
-    const tl = screenToWorld(0, 0);
-    const br = screenToWorld(logicalW, logicalH);
     const p = gridSpacing * padding;
-    return {
-        iMin: Math.floor((tl.x - p - gridOriginX) / gridSpacing),
-        iMax: Math.ceil((br.x + p - gridOriginX) / gridSpacing),
-        jMin: Math.floor((tl.y - p - gridOriginY) / gridSpacing),
-        jMax: Math.ceil((br.y + p - gridOriginY) / gridSpacing)
-    };
+    const invGs = 1 / gridSpacing;
+    _screenToWorldScratch(0, 0);
+    const tlX = _s2wX, tlY = _s2wY;
+    _screenToWorldScratch(logicalW, logicalH);
+    _vrIMin = Math.floor((tlX - p - gridOriginX) * invGs);
+    _vrIMax = Math.ceil((_s2wX + p - gridOriginX) * invGs);
+    _vrJMin = Math.floor((tlY - p - gridOriginY) * invGs);
+    _vrJMax = Math.ceil((_s2wY + p - gridOriginY) * invGs);
 }
 
 function wakeDot(i, j) {
@@ -647,9 +654,9 @@ function wakeDot(i, j) {
 }
 
 function wakeVisibleDots() {
-    const { iMin, iMax, jMin, jMax } = getVisibleRange(2);
-    for (let i = iMin; i <= iMax; i++) {
-        for (let j = jMin; j <= jMax; j++) {
+    getVisibleRange(2);
+    for (let i = _vrIMin; i <= _vrIMax; i++) {
+        for (let j = _vrJMin; j <= _vrJMax; j++) {
             wakeDot(i, j);
         }
     }
@@ -667,18 +674,29 @@ function wakeNearMouse() {
 }
 
 function sleepSettledDots() {
-    if (waveActive) return;
     const pt2 = sleepPosThr * sleepPosThr;
     const vt2 = sleepVelThr * sleepVelThr;
     const gs = gridSpacing;
     const gox = gridOriginX;
     const goy = gridOriginY;
+    // When wave is active, only sleep dots far from mouse AND wave origin
+    const waveGuard = waveActive;
+    const safeR2 = waveGuard ? (mouseForceRadius * 3) * (mouseForceRadius * 3) : 0;
+    const mwx = mouseWorldX, mwy = mouseWorldY;
+    const woX = waveOrigin.x, woY = waveOrigin.y;
     for (const [key, dot] of activeDots) {
         const hx = dot.i * gs + gox;
         const hy = dot.j * gs + goy;
         const dx = dot.x - hx;
         const dy = dot.y - hy;
         if (dx * dx + dy * dy < pt2 && dot.vx * dot.vx + dot.vy * dot.vy < vt2) {
+            if (waveGuard) {
+                // Don't sleep dots near mouse or wave origin — they may get disturbed
+                const dmx = hx - mwx, dmy = hy - mwy;
+                if (dmx * dmx + dmy * dmy < safeR2) continue;
+                const dwx = hx - woX, dwy = hy - woY;
+                if (dwx * dwx + dwy * dwy < safeR2) continue;
+            }
             activeDots.delete(key);
             activeKeySet.delete(key);
         }
@@ -686,9 +704,10 @@ function sleepSettledDots() {
 }
 
 function pruneOffscreen() {
-    const { iMin, iMax, jMin, jMax } = getVisibleRange(6);
+    getVisibleRange(6);
+    const pIMin = _vrIMin, pIMax = _vrIMax, pJMin = _vrJMin, pJMax = _vrJMax;
     for (const [key, dot] of activeDots) {
-        if (dot.i < iMin || dot.i > iMax || dot.j < jMin || dot.j > jMax) {
+        if (dot.i < pIMin || dot.i > pIMax || dot.j < pJMin || dot.j > pJMax) {
             activeDots.delete(key);
             activeKeySet.delete(key);
         }
@@ -730,6 +749,35 @@ function updateDots(dt) {
     const vcX = camera.x + logicalW / 2;
     const vcY = camera.y + logicalH / 2;
 
+    // Pre-compute gravity well positions + swirl (mode 7) — avoids 15 cos/sin per dot
+    const NUM_WELLS = 5;
+    const gravWellX = new Float32Array(NUM_WELLS);
+    const gravWellY = new Float32Array(NUM_WELLS);
+    const gravMass = new Float32Array(NUM_WELLS);
+    const gravSwirl = new Float32Array(NUM_WELLS);
+    let gravViewR = 0, gravSoft = 0;
+    if (wa && mode === 7) {
+        gravViewR = Math.min(logicalW, logicalH) / (2 * zoomFactor);
+        gravSoft = gs * 1.5;
+        for (let a = 0; a < NUM_WELLS; a++) {
+            const orb = gravViewR * GRAV_ORBIT_R[a];
+            const aAngle = wt * GRAV_SPEED[a] + GRAV_SEEDS[a] * TWO_PI;
+            gravWellX[a] = woX + Math.cos(aAngle) * orb;
+            gravWellY[a] = woY + Math.sin(aAngle * GRAV_FREQ_Y[a] + GRAV_SEEDS[a] * 10) * orb * 0.8;
+            gravMass[a] = gravViewR * GRAV_MASS[a];
+            gravSwirl[a] = 0.5 + 0.4 * Math.sin(wt * 0.4 + GRAV_SEEDS[a] * 5);
+        }
+    }
+
+    // Pre-compute drift wind rotation (mode 6) — avoids 2 cos/sin per dot
+    let driftWindCos = 0, driftWindSin = 0, driftT6 = 0;
+    if (wa && mode === 6) {
+        const windAngle = wt * 0.15;
+        driftWindCos = Math.cos(windAngle);
+        driftWindSin = Math.sin(windAngle);
+        driftT6 = wt * 0.25;
+    }
+
     for (const [, dot] of activeDots) {
         const hx = dot.i * gs + gox;
         const hy = dot.j * gs + goy;
@@ -741,8 +789,9 @@ function updateDots(dt) {
             const dx = hx - woX;
             const dy = hy - woY;
             const dist2 = dx * dx + dy * dy;
-            // Pre-compute dist for modes that need it (1-5 use it)
-            const dist = mode <= 5 ? Math.sqrt(dist2) : 0;
+            // Only compute sqrt for modes that actually use radial distance (1-3)
+            // Mode 4 uses its own source distances; mode 5 uses pole distance
+            const dist = mode <= 3 ? Math.sqrt(dist2) : 0;
 
             switch (mode) {
                 case 1: { // ── RIPPLE ────────────────────────
@@ -756,7 +805,7 @@ function updateDots(dt) {
                     break;
                 }
                 case 2: { // ── SPIRAL ────────────────────────
-                    const angle = Math.atan2(dy, dx);
+                    const angle = fastAtan2(dy, dx);
                     springMod = Math.max(wff, Math.exp(-dist * wfr));
                     const numArms = 5;
                     const baseGap = gs * 1.2;
@@ -770,12 +819,14 @@ function updateDots(dt) {
                     const armWidth = armGap * 0.35 * (1 + dist * 0.003);
                     const offset = dist - armCenter;
                     const snapR = armCenter + offset * Math.min(armWidth / (Math.abs(offset) + armWidth), 1);
-                    tx = woX + Math.cos(angle) * snapR;
-                    ty = woY + Math.sin(angle) * snapR;
+                    // Use dx/dist, dy/dist instead of cos/sin(angle) — already have them
+                    const invDist2 = 1 / (dist + 0.001);
+                    tx = woX + dx * invDist2 * snapR;
+                    ty = woY + dy * invDist2 * snapR;
                     break;
                 }
                 case 3: { // ── VORTEX ────────────────────────
-                    const angle = Math.atan2(dy, dx);
+                    const angle = fastAtan2(dy, dx);
                     springMod = Math.max(wff, Math.exp(-dist * wfr));
                     const vortexR = Math.min(logicalW, logicalH) / (2 * zoomFactor) * 0.85;
                     const vFade = dist < vortexR ? 1 : Math.exp(-(dist - vortexR) / (vortexR * 0.12));
@@ -798,7 +849,8 @@ function updateDots(dt) {
                     const combined = (wave1 + wave2) * 18;
                     tx = hx;
                     ty = hy + combined;
-                    springMod = Math.max(0.15, Math.exp(-dist * 0.001));
+                    // Use dist2 to avoid extra sqrt — exp(-sqrt(x)*k) ≈ exp(-x*k/2) for spring falloff
+                    springMod = Math.max(0.15, Math.exp(-Math.sqrt(dist2) * 0.001));
                     break;
                 }
                 case 5: { // ── DIPOLE ─────────────────────────
@@ -833,39 +885,30 @@ function updateDots(dt) {
                 case 6: { // ── DRIFT ──────────────────────────
                     const driftScale1 = 0.005, driftScale2 = 0.012;
                     const driftAmp = gs * 4;
-                    const t6 = wt * 0.25;
-                    const windAngle = wt * 0.15;
-                    const windCos = Math.cos(windAngle), windSin = Math.sin(windAngle);
-                    const rx = hx * windCos - hy * windSin;
-                    const ry = hx * windSin + hy * windCos;
-                    const n1x = smoothNoise(rx * driftScale1 + t6, ry * driftScale1) * 2 - 1;
-                    const n1y = smoothNoise(rx * driftScale1, ry * driftScale1 + t6 + 50) * 2 - 1;
-                    const n2x = smoothNoise(hx * driftScale2 + t6 * 1.5 + 200, hy * driftScale2) * 2 - 1;
-                    const n2y = smoothNoise(hx * driftScale2, hy * driftScale2 + t6 * 1.5 + 300) * 2 - 1;
+                    // Use pre-computed wind rotation (hoisted above loop)
+                    const rx = hx * driftWindCos - hy * driftWindSin;
+                    const ry = hx * driftWindSin + hy * driftWindCos;
+                    const n1x = smoothNoise(rx * driftScale1 + driftT6, ry * driftScale1) * 2 - 1;
+                    const n1y = smoothNoise(rx * driftScale1, ry * driftScale1 + driftT6 + 50) * 2 - 1;
+                    const n2x = smoothNoise(hx * driftScale2 + driftT6 * 1.5 + 200, hy * driftScale2) * 2 - 1;
+                    const n2y = smoothNoise(hx * driftScale2, hy * driftScale2 + driftT6 * 1.5 + 300) * 2 - 1;
                     tx = hx + (n1x * 0.7 + n2x * 0.3) * driftAmp;
                     ty = hy + (n1y * 0.7 + n2y * 0.3) * driftAmp;
                     springMod = 0.5;
                     break;
                 }
                 case 7: { // ── GRAVITY ────────────────────────
-                    const viewR = Math.min(logicalW, logicalH) / (2 * zoomFactor);
-                    const soft = gs * 1.5;
-                    const NUM_WELLS = 5;
+                    // Well positions, mass, swirl pre-computed above loop
                     let pullX = 0, pullY = 0;
                     for (let a = 0; a < NUM_WELLS; a++) {
-                        const orb = viewR * GRAV_ORBIT_R[a];
-                        const mass = viewR * GRAV_MASS[a];
-                        const aAngle = wt * GRAV_SPEED[a] + GRAV_SEEDS[a] * TWO_PI;
-                        const ax = woX + Math.cos(aAngle) * orb;
-                        const ay = woY + Math.sin(aAngle * GRAV_FREQ_Y[a] + GRAV_SEEDS[a] * 10) * orb * 0.8;
-                        const adx = ax - hx, ady = ay - hy;
-                        const aDist = Math.sqrt(adx * adx + ady * ady) + soft;
+                        const adx = gravWellX[a] - hx, ady = gravWellY[a] - hy;
+                        const aDist = Math.sqrt(adx * adx + ady * ady) + gravSoft;
                         const invD = 1 / aDist;
-                        const pull = mass * invD;
+                        const pull = gravMass[a] * invD;
                         const nx = adx * invD, ny = ady * invD;
-                        const swirl = 0.5 + 0.4 * Math.sin(wt * 0.4 + GRAV_SEEDS[a] * 5);
-                        pullX += nx * pull + (-ny) * pull * swirl;
-                        pullY += ny * pull + nx * pull * swirl;
+                        const sw = gravSwirl[a];
+                        pullX += nx * pull - ny * pull * sw;
+                        pullY += ny * pull + nx * pull * sw;
                     }
                     tx = hx + pullX;
                     ty = hy + pullY;
@@ -929,19 +972,22 @@ function updateDots(dt) {
             fy += mdy * scale;
         }
 
-        // Neighbor repulsion (combined division for fewer ops)
-        for (let n = 0; n < 16; n += 2) {
-            const nk = dotKey(dot.i + NEIGHBORS[n], dot.j + NEIGHBORS[n + 1]);
-            const nd = activeDots.get(nk);
-            if (!nd) continue;
-            const ndx = dot.x - nd.x;
-            const ndy = dot.y - nd.y;
-            const nd2 = ndx * ndx + ndy * ndy;
-            if (nd2 < rr2 && nd2 > 0.01) {
-                const ndist = Math.sqrt(nd2);
-                const scale = rs * (1 - ndist / rr) / ndist;
-                fx += ndx * scale;
-                fy += ndy * scale;
+        // Neighbor repulsion — skip for slow dots (saves 8 key hashes + 8 Map lookups)
+        const spd2 = dot.vx * dot.vx + dot.vy * dot.vy;
+        if (spd2 > 4) { // only check neighbors when dot is moving meaningfully (>2 px/s)
+            for (let n = 0; n < 16; n += 2) {
+                const nk = dotKey(dot.i + NEIGHBORS[n], dot.j + NEIGHBORS[n + 1]);
+                const nd = activeDots.get(nk);
+                if (!nd) continue;
+                const ndx = dot.x - nd.x;
+                const ndy = dot.y - nd.y;
+                const nd2 = ndx * ndx + ndy * ndy;
+                if (nd2 < rr2 && nd2 > 0.01) {
+                    const ndist = Math.sqrt(nd2);
+                    const scale = rs * (1 - ndist / rr) / ndist;
+                    fx += ndx * scale;
+                    fy += ndy * scale;
+                }
             }
         }
 
@@ -1449,7 +1495,8 @@ function drawDots() {
     // Beat visual: pulse the base radius
     const beatR = beatDecay > 0 ? baseR * (1 + beatDecay * 0.4) : baseR;
 
-    const { iMin, iMax, jMin, jMax } = getVisibleRange(0);
+    getVisibleRange(0);
+    const iMin = _vrIMin, iMax = _vrIMax, jMin = _vrJMin, jMax = _vrJMax;
     debugDotTotal = (iMax - iMin + 1) * (jMax - jMin + 1);
     debugDotActive = activeDots.size;
 
@@ -1459,97 +1506,130 @@ function drawDots() {
     const jStart = Math.ceil(jMin / step) * step;
 
     // ── 1) Resting dots ─────────────────────────────────
-    for (let i = iStart; i <= iMax; i += step) {
-        const wx = i * gs + gox;
-        const colSx = wx * zf + offX;
-        if (colSx < -margin - txtMarg || colSx > cw + margin + txtMarg) continue;
-        for (let j = jStart; j <= jMax; j += step) {
-            if (activeKeySet.has(dotKey(i, j))) continue;
-            const rowSy = (j * gs + goy) * zf + offY;
-            if (rowSy < -margin - txtMarg || rowSy > ch + margin + txtMarg) continue;
+    // Fast path: no mic, no text, no effects — just push white dots at grid positions
+    const restingSimple = !micDraw && !textDraw && !cbDraw;
+    const _gsZf2 = gs * zf * 2; // hoisted for mic displacement
+    const _micPropInvSpd = 1 / micPropSpd; // avoid per-dot division
 
-            let sx = colSx, sy = rowSy;
-            let cr = 1, cg = 1, cb = 1; // white default
+    if (restingSimple) {
+        // Minimal per-dot work: just bounds check + push
+        const buf = glDotBuf;
+        for (let i = iStart; i <= iMax; i += step) {
+            const colSx = (i * gs + gox) * zf + offX;
+            if (colSx < -margin || colSx > cw + margin) continue;
+            for (let j = jStart; j <= jMax; j += step) {
+                if (activeKeySet.has(dotKey(i, j))) continue;
+                const rowSy = (j * gs + goy) * zf + offY;
+                if (rowSy < -margin || rowSy > ch + margin) continue;
+                // Inline pushDot to avoid function call overhead
+                const off = glDotCount * 6;
+                buf[off] = colSx; buf[off + 1] = rowSy; buf[off + 2] = beatR;
+                buf[off + 3] = 1; buf[off + 4] = 1; buf[off + 5] = 1;
+                glDotCount++;
+                drawn++;
+            }
+        }
+    } else {
+        for (let i = iStart; i <= iMax; i += step) {
+            const wx = i * gs + gox;
+            const colSx = wx * zf + offX;
+            if (colSx < -margin - txtMarg || colSx > cw + margin + txtMarg) continue;
+            for (let j = jStart; j <= jMax; j += step) {
+                if (activeKeySet.has(dotKey(i, j))) continue;
+                const rowSy = (j * gs + goy) * zf + offY;
+                if (rowSy < -margin - txtMarg || rowSy > ch + margin + txtMarg) continue;
 
-            if (micDraw) {
-                const mdx = colSx - micCx, mdy = rowSy - micCy;
-                const mDist = Math.sqrt(mdx * mdx + mdy * mdy);
-                if (mDist > 0.1) {
-                    const bin = posToFreqBin(sx, sy,micBins);
-                    const energy = micSmoothed[bin];
-                    const disp = energy * gs * zf * 2 * micVolScale;
+                let sx = colSx, sy = rowSy;
+                let cr = 1, cg = 1, cb = 1;
 
-                    const delayFrames = Math.min(Math.round(mDist / micPropSpd * micPropFps), MIC_PROP_SIZE - 1);
-                    const propIdx = ((micPropHead - 1 - delayFrames) % MIC_PROP_SIZE + MIC_PROP_SIZE) % MIC_PROP_SIZE;
-                    const propEnergy = micPropBuf[propIdx];
-                    const propDecay = 1 / (1 + mDist * 0.002);
-                    const propDisp = propEnergy * gs * zf * 2 * propDecay;
+                if (micDraw) {
+                    const mdx = colSx - micCx, mdy = rowSy - micCy;
+                    const md2 = mdx * mdx + mdy * mdy;
+                    if (md2 > 0.01) {
+                        const mDist = Math.sqrt(md2);
+                        const invDist = 1 / mDist;
+                        const bin = posToFreqBin(sx, sy, micBins);
+                        const energy = micSmoothed[bin];
+                        const disp = energy * _gsZf2 * micVolScale;
 
-                    const totalDisp = disp + propDisp;
-                    sx += (mdx / mDist) * totalDisp;
-                    sy += (mdy / mDist) * totalDisp;
-                    if (totalDisp > 0.5) micAffected++;
+                        const delayFrames = Math.min((mDist * _micPropInvSpd * micPropFps + 0.5) | 0, MIC_PROP_SIZE - 1);
+                        const propIdx = ((micPropHead - 1 - delayFrames) % MIC_PROP_SIZE + MIC_PROP_SIZE) % MIC_PROP_SIZE;
+                        const propEnergy = micPropBuf[propIdx];
+                        const propDecay = 1 / (1 + mDist * 0.002);
+                        const propDisp = propEnergy * _gsZf2 * propDecay;
 
-                    if (!cbDraw) {
-                        const visualEnergy = Math.max(energy, propEnergy * propDecay);
-                        if (visualEnergy > 0.02) {
-                            const ci = Math.min((visualEnergy * 357) | 0, 255);
-                            const ci3 = ci * 3;
-                            cr = COLOR_LUT_RGB[ci3];
-                            cg = COLOR_LUT_RGB[ci3 + 1];
-                            cb = COLOR_LUT_RGB[ci3 + 2];
+                        const totalDisp = disp + propDisp;
+                        sx += mdx * invDist * totalDisp;
+                        sy += mdy * invDist * totalDisp;
+                        if (totalDisp > 0.5) micAffected++;
+
+                        if (!cbDraw) {
+                            const visualEnergy = Math.max(energy, propEnergy * propDecay);
+                            if (visualEnergy > 0.02) {
+                                const ci = Math.min((visualEnergy * 357) | 0, 255);
+                                const ci3 = ci * 3;
+                                cr = COLOR_LUT_RGB[ci3];
+                                cg = COLOR_LUT_RGB[ci3 + 1];
+                                cb = COLOR_LUT_RGB[ci3 + 2];
+                            }
                         }
                     }
                 }
+
+                if (textDraw && textDisp(sx, sy)) { sx += _tdx; sy += _tdy; }
+
+                if (cbDraw) {
+                    computeColorbandRGB(sx, sy, micSmoothed);
+                    cr = _cbR; cg = _cbG; cb = _cbB;
+                }
+
+                pushDot(sx, sy, beatR, cr, cg, cb);
+                drawn++;
             }
-
-            if (textDraw && textDisp(sx, sy)) { sx += _tdx; sy += _tdy; }
-
-            if (cbDraw) {
-                computeColorbandRGB(sx, sy, micSmoothed);
-                cr = _cbR; cg = _cbG; cb = _cbB;
-            }
-
-            pushDot(sx, sy, beatR, cr, cg, cb);
-            drawn++;
         }
     }
 
     // ── 2) Active dots ──────────────────────────────────
+    const _fxColor = fxColor && !micDraw && !cbDraw; // pre-check: speed coloring only when no mic/cb
+    const _fxSize = fxSize;
     for (const [, dot] of activeDots) {
         let sx = dot.x * zf + offX;
         let sy = dot.y * zf + offY;
         if (sx < -margin - 20 - txtMarg || sx > cw + margin + 20 + txtMarg ||
             sy < -margin - 20 - txtMarg || sy > ch + margin + 20 + txtMarg) continue;
 
-        const speed = Math.sqrt(dot.vx * dot.vx + dot.vy * dot.vy);
+        // Use speed² where possible; only sqrt when actually needed for display
+        const spd2 = dot.vx * dot.vx + dot.vy * dot.vy;
 
-        // Mic: compute distance once, share between displacement and color
-        let _aMdx = 0, _aMdy = 0, _aMDist = 0;
+        // Mic displacement + color in one pass (single sqrt, shared results)
+        let _aMicVisE = 0; // visual energy for color (shared between displacement & color)
         if (micDraw) {
-            _aMdx = sx - micCx; _aMdy = sy - micCy;
-            _aMDist = Math.sqrt(_aMdx * _aMdx + _aMdy * _aMdy);
-            if (_aMDist > 0.1) {
+            const _aMdx = sx - micCx, _aMdy = sy - micCy;
+            const _aMd2 = _aMdx * _aMdx + _aMdy * _aMdy;
+            if (_aMd2 > 0.01) {
+                const _aMDist = Math.sqrt(_aMd2);
+                const invDist = 1 / _aMDist;
                 const bin = posToFreqBin(sx, sy, micBins);
                 const energy = micSmoothed[bin];
-                const disp = energy * gs * zf * 2 * micVolScale;
+                const disp = energy * _gsZf2 * micVolScale;
 
-                const delayFrames = Math.min(Math.round(_aMDist / micPropSpd * micPropFps), MIC_PROP_SIZE - 1);
+                const delayFrames = Math.min((_aMDist * _micPropInvSpd * micPropFps + 0.5) | 0, MIC_PROP_SIZE - 1);
                 const propIdx = ((micPropHead - 1 - delayFrames) % MIC_PROP_SIZE + MIC_PROP_SIZE) % MIC_PROP_SIZE;
                 const propEnergy = micPropBuf[propIdx];
                 const propDecay = 1 / (1 + _aMDist * 0.002);
-                const propDisp = propEnergy * gs * zf * 2 * propDecay;
+                const propDisp = propEnergy * _gsZf2 * propDecay;
 
                 const totalDisp = disp + propDisp;
-                sx += (_aMdx / _aMDist) * totalDisp;
-                sy += (_aMdy / _aMDist) * totalDisp;
+                sx += _aMdx * invDist * totalDisp;
+                sy += _aMdy * invDist * totalDisp;
+                _aMicVisE = Math.max(energy, propEnergy * propDecay);
             }
         }
 
         if (textDraw && textDisp(sx, sy)) { sx += _tdx; sy += _tdy; }
 
         let r = beatR;
-        if (fxSize) r = beatR * (1 + Math.min(speed * 0.0008, 0.3));
+        if (_fxSize) r = beatR * (1 + Math.min(Math.sqrt(spd2) * 0.0008, 0.3));
 
         let cr, cg, cb;
         if (cbDraw) {
@@ -1557,24 +1637,16 @@ function drawDots() {
             cr = _cbR; cg = _cbG; cb = _cbB;
         } else if (micDraw) {
             cr = 1; cg = 1; cb = 1;
-            // Reuse mDist from displacement (recompute mdx/mdy since sx/sy may have shifted)
-            const mdx = sx - micCx, mdy = sy - micCy;
-            const mDist = Math.sqrt(mdx * mdx + mdy * mdy);
-            const bin = posToFreqBin(sx, sy, micBins);
-            const energy = micSmoothed[bin];
-            const delayF = Math.min(Math.round(mDist / micPropSpd * micPropFps), MIC_PROP_SIZE - 1);
-            const pIdx = ((micPropHead - 1 - delayF) % MIC_PROP_SIZE + MIC_PROP_SIZE) % MIC_PROP_SIZE;
-            const pE = micPropBuf[pIdx] / (1 + mDist * 0.002);
-            const visE = Math.max(energy, pE);
-            if (visE > 0.02) {
-                const ci = Math.min((visE * 357) | 0, 255);
+            // Reuse visual energy from displacement pass — no second sqrt needed
+            if (_aMicVisE > 0.02) {
+                const ci = Math.min((_aMicVisE * 357) | 0, 255);
                 const ci3 = ci * 3;
                 cr = COLOR_LUT_RGB[ci3];
                 cg = COLOR_LUT_RGB[ci3 + 1];
                 cb = COLOR_LUT_RGB[ci3 + 2];
             }
-        } else if (fxColor) {
-            const ci = Math.min((speed * 1.02) | 0, 255);
+        } else if (_fxColor) {
+            const ci = Math.min((Math.sqrt(spd2) * 1.02) | 0, 255);
             const ci3 = ci * 3;
             cr = COLOR_LUT_RGB[ci3];
             cg = COLOR_LUT_RGB[ci3 + 1];
@@ -1924,6 +1996,7 @@ function toggleWallpaperMode() {
 
 if (window.electronAPI) {
     // Listen for wallpaper mode changes from main process (tray / global shortcut)
+    let _preWallpaperZoom = null;
     window.electronAPI.onWallpaperModeChanged((enabled) => {
         wallpaperModeActive = enabled;
         setPowerMode(enabled ? 'wallpaper' : 'normal');
@@ -1931,6 +2004,15 @@ if (window.electronAPI) {
             // Auto-activate waves so the mouse interaction is visible
             mouseHasEntered = true;
             waveActive = true;
+            // Zoom in slightly to reduce total visible dots (saves CPU/GPU)
+            _preWallpaperZoom = zoomFactor;
+            if (zoomFactor < 0.65) zoomFactor = 0.65;
+        } else {
+            // Restore previous zoom when exiting wallpaper mode
+            if (_preWallpaperZoom !== null) {
+                zoomFactor = _preWallpaperZoom;
+                _preWallpaperZoom = null;
+            }
         }
         showLabel(enabled ? 'WALLPAPER' : 'WINDOWED');
     });
@@ -1953,6 +2035,17 @@ if (window.electronAPI) {
             computeRingRadii();
             waveActive = true;
             wakeVisibleDots();
+        }
+    });
+
+    // Pause everything when wallpaper is fully occluded (fullscreen app in front, etc.)
+    window.electronAPI.onWallpaperOccluded((occluded) => {
+        if (occluded) {
+            _loopPaused = true;
+        } else {
+            _loopPaused = false;
+            lastTime = performance.now(); // reset dt to avoid huge jump
+            _loopRafId = requestAnimationFrame(loop);
         }
     });
 

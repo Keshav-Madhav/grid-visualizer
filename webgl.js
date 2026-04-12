@@ -2,7 +2,7 @@
 // Replaces Canvas 2D batched rendering with a single GPU draw call.
 // All dots are rendered as GL_POINTS with circular fragment shader.
 
-const GL_MAX_DOTS = 100000;
+const GL_MAX_DOTS = 50000;
 
 // CPU-side interleaved buffer: [x, y, radius, r, g, b] per dot (6 floats)
 const glDotBuf = new Float32Array(GL_MAX_DOTS * 6);
@@ -91,10 +91,10 @@ function initWebGL(gl) {
     _uResolution = gl.getUniformLocation(_glProgram, 'u_resolution');
     _uDpr = gl.getUniformLocation(_glProgram, 'u_dpr');
 
-    // Interleaved VBO — pre-allocate for max dots
+    // Interleaved VBO — pre-allocate for max dots (1.2MB at 50K)
     _glVBO = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, _glVBO);
-    gl.bufferData(gl.ARRAY_BUFFER, GL_MAX_DOTS * 6 * 4, gl.DYNAMIC_DRAW);
+    gl.bufferData(gl.ARRAY_BUFFER, GL_MAX_DOTS * 24, gl.DYNAMIC_DRAW);
 
     // Attribute pointers (stride = 6 floats = 24 bytes)
     const stride = 24;

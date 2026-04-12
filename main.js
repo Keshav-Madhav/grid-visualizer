@@ -13,6 +13,33 @@ app.commandLine.appendSwitch('disable-renderer-backgrounding');
 app.commandLine.appendSwitch('disable-background-timer-throttling');
 app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
 
+// ── Memory Reduction ──────────────────────────────────────
+// Merge GPU into browser process — eliminates ~100-200MB separate process overhead
+app.commandLine.appendSwitch('in-process-gpu');
+// Prefer integrated GPU on macOS — less VRAM, prevents discrete GPU wake
+app.commandLine.appendSwitch('force_low_power_gpu');
+// Kill unused Chromium background services
+app.commandLine.appendSwitch('disable-background-networking');
+app.commandLine.appendSwitch('disable-component-update');
+app.commandLine.appendSwitch('disable-breakpad');
+app.commandLine.appendSwitch('disable-domain-reliability');
+app.commandLine.appendSwitch('no-pings');
+app.commandLine.appendSwitch('no-first-run');
+// Zero disk/HTTP cache — this is a local-file-only app
+app.commandLine.appendSwitch('disk-cache-size', '1');
+app.commandLine.appendSwitch('disable-http-cache');
+// Disable unused Chromium features that each consume RAM
+app.commandLine.appendSwitch('disable-features',
+    'MediaRouter,OptimizationHints,TranslateUI,AutofillServerCommunication,' +
+    'HardwareMediaKeyHandling,MediaSessionService,GlobalMediaControls,' +
+    'BackgroundSync,NotificationTriggers,IdleDetection,' +
+    'AudioServiceOutOfProcess');   // merge audio service into browser process
+// Cap V8 heap — this app uses typed arrays (outside V8 heap), not big JS objects
+app.commandLine.appendSwitch('js-flags',
+    '--max-old-space-size=256 --max-semi-space-size=16 --optimize-for-size');
+// Software Canvas 2D for the overlay — saves GPU memory, overlay is tiny
+app.commandLine.appendSwitch('disable-accelerated-2d-canvas');
+
 let mainWindow;
 let audioProcess = null;
 let nowPlayingProcess = null;
@@ -47,7 +74,9 @@ function createWindow() {
         webPreferences: {
             preload: path.join(__dirname, 'preload.js'),
             contextIsolation: true,
-            nodeIntegration: false
+            nodeIntegration: false,
+            spellcheck: false,
+            enableWebSQL: false
         }
     });
 
@@ -330,7 +359,9 @@ function enterWallpaperMode() {
             backgroundThrottling: false,
             preload: path.join(__dirname, 'preload.js'),
             contextIsolation: true,
-            nodeIntegration: false
+            nodeIntegration: false,
+            spellcheck: false,
+            enableWebSQL: false
         }
     });
 
@@ -353,20 +384,50 @@ function enterWallpaperMode() {
     mainWindow.hide();
 
     // Poll mouse position since desktop windows don't receive mouse events
+    // 32ms (~30fps) is plenty for cursor tracking in wallpaper mode — saves IPC overhead
     mousePoller = setInterval(() => {
         if (wallpaperWindow && !wallpaperWindow.isDestroyed()) {
             const point = screen.getCursorScreenPoint();
             wallpaperWindow.webContents.send('mouse-position', point.x, point.y);
         }
-    }, 16); // ~60fps
+    }, 32);
+
+    // Start occlusion detection for wallpaper mode
+    startOcclusionDetection();
 
     updateAudioTarget();
     updateTrayMenu();
 }
 
+// ── Occlusion Detection ──────────────────────────────────────
+// Pause rendering when another fullscreen app covers the wallpaper (zero CPU usage)
+let _occlusionPoller = null;
+let _wallpaperOccluded = false;
+
+function startOcclusionDetection() {
+    stopOcclusionDetection();
+    _wallpaperOccluded = false;
+    _occlusionPoller = setInterval(() => {
+        if (!wallpaperMode || !wallpaperWindow || wallpaperWindow.isDestroyed()) return;
+        // On macOS, isOccluded() returns true when another fullscreen app / space covers the window
+        const occluded = wallpaperWindow.isOccluded();
+        if (occluded !== _wallpaperOccluded) {
+            _wallpaperOccluded = occluded;
+            wallpaperWindow.webContents.send('wallpaper-occluded', occluded);
+        }
+    }, 1000); // check every second — no need to be fast, state changes are infrequent
+}
+
+function stopOcclusionDetection() {
+    if (_occlusionPoller) { clearInterval(_occlusionPoller); _occlusionPoller = null; }
+    _wallpaperOccluded = false;
+}
+
 function exitWallpaperMode() {
     if (!wallpaperMode) return;
     wallpaperMode = false;
+
+    stopOcclusionDetection();
 
     // Stop mouse polling
     if (mousePoller) {
@@ -429,9 +490,35 @@ function sendTrayAction(action, value) {
     if (w) w.webContents.send('tray-action', action, value);
 }
 
+// ── Resource Usage Tracking ─────────────────────────────────
+let _lastCpuUsage = process.cpuUsage();
+let _lastCpuTime = Date.now();
+let _cpuPercent = 0;
+let _totalMemMB = 0;
+
+function getResourceStats() {
+    const now = Date.now();
+    const elapsed = (now - _lastCpuTime) * 1000; // to microseconds
+    if (elapsed > 0) {
+        const cpu = process.cpuUsage(_lastCpuUsage);
+        _cpuPercent = Math.round(((cpu.user + cpu.system) / elapsed) * 100);
+        _lastCpuUsage = process.cpuUsage();
+        _lastCpuTime = now;
+    }
+    try {
+        const metrics = app.getAppMetrics();
+        let totalKB = 0;
+        for (const m of metrics) totalKB += m.memory.workingSetSize || 0;
+        _totalMemMB = Math.round(totalKB / 1024);
+    } catch (e) { /* not available */ }
+}
+
 function updateTrayMenu() {
     if (!tray) return;
+    getResourceStats();
     const contextMenu = Menu.buildFromTemplate([
+        { label: `CPU: ${_cpuPercent}%  ·  RAM: ${_totalMemMB} MB`, enabled: false },
+        { type: 'separator' },
         {
             label: wallpaperMode ? '✓ Wallpaper Mode' : 'Wallpaper Mode',
             click: () => toggleWallpaperMode()
@@ -501,6 +588,10 @@ function setupTray() {
     tray = new Tray(createTrayIcon());
     tray.setToolTip('Grid Visualizer');
     updateTrayMenu();
+    // Rebuild menu on every click so CPU/RAM stats are fresh
+    tray.on('mouse-enter', updateTrayMenu);
+    tray.on('right-click', updateTrayMenu);
+    tray.on('click', updateTrayMenu);
 }
 
 // ── macOS Application Menu ────────────────────────────────────

@@ -83,5 +83,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     onTrayAction: (callback) => {
         ipcRenderer.removeAllListeners('tray-action');
         ipcRenderer.on('tray-action', (event, action, value) => callback(action, value));
+    },
+    onWallpaperOccluded: (callback) => {
+        ipcRenderer.removeAllListeners('wallpaper-occluded');
+        ipcRenderer.on('wallpaper-occluded', (event, occluded) => callback(occluded));
     }
 });

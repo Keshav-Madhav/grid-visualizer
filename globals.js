@@ -1,7 +1,13 @@
 // ── Canvas Setup (WebGL + 2D Overlay) ──────────────────
 const glCanvas = document.getElementById('glCanvas');
-const gl = glCanvas.getContext('webgl', { antialias: false, alpha: false })
-        || glCanvas.getContext('experimental-webgl', { antialias: false, alpha: false });
+const gl = glCanvas.getContext('webgl', {
+            antialias: false, alpha: false,
+            depth: false, stencil: false,     // gl.POINTS needs neither — saves GPU buffer memory
+            preserveDrawingBuffer: false,
+            powerPreference: 'low-power',     // prefer integrated GPU, less VRAM
+            desynchronized: true              // reduce sync overhead
+        })
+        || glCanvas.getContext('experimental-webgl', { antialias: false, alpha: false, depth: false, stencil: false });
 const canvas = document.getElementById('overlayCanvas'); // events + cursor/debug
 const ctx = canvas.getContext('2d');
 
@@ -111,9 +117,12 @@ let typeMode = false;
 let typeText = '';
 
 // Simple noise (seeded hash for noise field mode)
+// Integer-only hash — avoids Math.sin (which is ~10x slower than bitwise ops)
 function hashNoise(x, y) {
-    let n = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
-    return n - Math.floor(n);
+    let h = (x * 374761393 + y * 668265263 + 1013904223) | 0;
+    h = (h ^ (h >>> 13)) * 1274126177 | 0;
+    h = h ^ (h >>> 16);
+    return (h & 0x7fffffff) / 0x7fffffff;
 }
 function smoothNoise(x, y) {
     const ix = Math.floor(x), iy = Math.floor(y);
@@ -131,6 +140,25 @@ let modeLabelAlpha = 0;
 // Constants
 const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
 const TWO_PI = Math.PI * 2;
+const PI = Math.PI;
+
+// Fast atan2 approximation (~5x faster than Math.atan2, max error ~0.01 rad)
+// Uses the identity: atan2(y,x) ≈ atan(y/x) + quadrant correction
+// with a rational polynomial for atan on [0,1]
+function fastAtan2(y, x) {
+    const ax = x < 0 ? -x : x;
+    const ay = y < 0 ? -y : y;
+    const mn = ax < ay ? ax : ay;
+    const mx = ax > ay ? ax : ay;
+    const a = mn / (mx + 1e-18); // avoid div-by-zero
+    // Polynomial approximation of atan on [0,1]: max err ~0.0038 rad
+    const s = a * a;
+    let r = ((-0.0464964749 * s + 0.15931422) * s - 0.327622764) * s * a + a;
+    if (ay > ax) r = 1.5707963268 - r;
+    if (x < 0) r = 3.1415926536 - r;
+    if (y < 0) r = -r;
+    return r;
+}
 
 // Distance-based spring falloff
 const waveFalloffRate = 0.003;
