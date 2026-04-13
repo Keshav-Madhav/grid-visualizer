@@ -2038,17 +2038,6 @@ if (window.electronAPI) {
         }
     });
 
-    // Pause everything when wallpaper is fully occluded (fullscreen app in front, etc.)
-    window.electronAPI.onWallpaperOccluded((occluded) => {
-        if (occluded) {
-            _loopPaused = true;
-        } else {
-            _loopPaused = false;
-            lastTime = performance.now(); // reset dt to avoid huge jump
-            _loopRafId = requestAnimationFrame(loop);
-        }
-    });
-
     // Listen for mode changes from tray menu (legacy)
     window.electronAPI.onSetMode((mode) => {
         if (clockMode) { clockMode = false; lastClockText = ''; }

@@ -48,6 +48,48 @@ let wallpaperMode = false;
 let wallpaperWindow = null; // separate desktop-level window
 let mousePoller = null; // interval for polling cursor in wallpaper mode
 
+// Wallpaper mode relies on type: 'desktop' + setSimpleFullScreen + setVisibleOnAllWorkspaces,
+// which only fully work on macOS. Windows has no desktop-window type (WorkerW reparenting
+// would need a native helper), and Linux/Wayland has no portable equivalent. Gate the UI
+// so users on unsupported platforms don't get a broken / floating fullscreen window.
+const WALLPAPER_SUPPORTED = process.platform === 'darwin';
+
+// ── Crash Loop Guard ──────────────────────────────────────
+// Default Electron behavior is to show a modal dialog for every uncaughtException.
+// If the error is inside a setInterval, the dialog re-appears every tick — the user
+// gets trapped clicking OK forever. This guard shows the dialog once, then force-quits
+// if the same error keeps firing (i.e. we're stuck in a crash loop).
+const _recentErrors = []; // timestamps of recent uncaught errors
+process.on('uncaughtException', (err) => {
+    const now = Date.now();
+    _recentErrors.push(now);
+    // Keep only errors from the last 5 seconds
+    while (_recentErrors.length && now - _recentErrors[0] > 5000) _recentErrors.shift();
+
+    console.error('[uncaughtException]', err);
+
+    // 3+ errors in 5s = crash loop, exit immediately without dialog
+    if (_recentErrors.length >= 3) {
+        console.error('[crash-loop] exiting to break loop');
+        app.exit(1);
+        return;
+    }
+
+    // Show a single non-blocking dialog with a Quit option so the user can bail out.
+    // dialog.showMessageBox returns a promise — clicking OK doesn't block the event loop.
+    dialog.showMessageBox({
+        type: 'error',
+        title: 'Grid Visualizer — Error',
+        message: 'An unexpected error occurred.',
+        detail: String(err && err.stack || err),
+        buttons: ['Quit', 'Continue'],
+        defaultId: 0,
+        cancelId: 0
+    }).then(({ response }) => {
+        if (response === 0) app.exit(1);
+    }).catch(() => { app.exit(1); });
+});
+
 // In packaged app, extraResources land under process.resourcesPath
 function getNativeBinaryPath() {
     const packaged = path.join(process.resourcesPath, 'native', 'capture-audio');
@@ -117,10 +159,12 @@ app.whenReady().then(async () => {
     setupTray();
     setupAppMenu();
 
-    // Global shortcut to toggle wallpaper mode from anywhere
-    globalShortcut.register('CommandOrControl+Shift+W', () => {
-        toggleWallpaperMode();
-    });
+    // Global shortcut to toggle wallpaper mode from anywhere (macOS only — see WALLPAPER_SUPPORTED)
+    if (WALLPAPER_SUPPORTED) {
+        globalShortcut.register('CommandOrControl+Shift+W', () => {
+            toggleWallpaperMode();
+        });
+    }
 
     // ── Auto-update (GitHub Releases) ──────────────────────
     autoUpdater.autoDownload = true;
@@ -392,42 +436,13 @@ function enterWallpaperMode() {
         }
     }, 32);
 
-    // Start occlusion detection for wallpaper mode
-    startOcclusionDetection();
-
     updateAudioTarget();
     updateTrayMenu();
-}
-
-// ── Occlusion Detection ──────────────────────────────────────
-// Pause rendering when another fullscreen app covers the wallpaper (zero CPU usage)
-let _occlusionPoller = null;
-let _wallpaperOccluded = false;
-
-function startOcclusionDetection() {
-    stopOcclusionDetection();
-    _wallpaperOccluded = false;
-    _occlusionPoller = setInterval(() => {
-        if (!wallpaperMode || !wallpaperWindow || wallpaperWindow.isDestroyed()) return;
-        // On macOS, isOccluded() returns true when another fullscreen app / space covers the window
-        const occluded = wallpaperWindow.isOccluded();
-        if (occluded !== _wallpaperOccluded) {
-            _wallpaperOccluded = occluded;
-            wallpaperWindow.webContents.send('wallpaper-occluded', occluded);
-        }
-    }, 1000); // check every second — no need to be fast, state changes are infrequent
-}
-
-function stopOcclusionDetection() {
-    if (_occlusionPoller) { clearInterval(_occlusionPoller); _occlusionPoller = null; }
-    _wallpaperOccluded = false;
 }
 
 function exitWallpaperMode() {
     if (!wallpaperMode) return;
     wallpaperMode = false;
-
-    stopOcclusionDetection();
 
     // Stop mouse polling
     if (mousePoller) {
@@ -464,6 +479,17 @@ function updateAudioTarget() {
 }
 
 function toggleWallpaperMode() {
+    if (!WALLPAPER_SUPPORTED) {
+        dialog.showMessageBox({
+            type: 'info',
+            title: 'Wallpaper Mode',
+            message: 'Wallpaper mode is macOS only in this release.',
+            detail: 'Windows (WorkerW reparenting) and Linux (X11 / Wayland) support is planned for a future release.',
+            buttons: ['OK'],
+            defaultId: 0
+        });
+        return;
+    }
     if (wallpaperMode) exitWallpaperMode();
     else enterWallpaperMode();
 }
@@ -520,7 +546,10 @@ function updateTrayMenu() {
         { label: `CPU: ${_cpuPercent}%  ·  RAM: ${_totalMemMB} MB`, enabled: false },
         { type: 'separator' },
         {
-            label: wallpaperMode ? '✓ Wallpaper Mode' : 'Wallpaper Mode',
+            label: WALLPAPER_SUPPORTED
+                ? (wallpaperMode ? '✓ Wallpaper Mode' : 'Wallpaper Mode')
+                : 'Wallpaper Mode (macOS only)',
+            enabled: WALLPAPER_SUPPORTED,
             click: () => toggleWallpaperMode()
         },
         { type: 'separator' },
@@ -617,8 +646,9 @@ function setupAppMenu() {
             label: 'View',
             submenu: [
                 {
-                    label: 'Wallpaper Mode',
-                    accelerator: 'CmdOrCtrl+Shift+W',
+                    label: WALLPAPER_SUPPORTED ? 'Wallpaper Mode' : 'Wallpaper Mode (macOS only)',
+                    accelerator: WALLPAPER_SUPPORTED ? 'CmdOrCtrl+Shift+W' : undefined,
+                    enabled: WALLPAPER_SUPPORTED,
                     click: () => toggleWallpaperMode()
                 },
                 { type: 'separator' },
